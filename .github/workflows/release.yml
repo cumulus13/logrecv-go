@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build all platforms
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -count=1 ./...
+      - name: Build release archives
+        run: .github/scripts/build-release.sh "$GITHUB_REF_NAME" dist
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz *.zip > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flags=(--repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag)
+          # tags like v1.2.3-rc.1 are marked as pre-releases
+          [[ "$TAG" == *-* ]] && flags+=(--prerelease)
+          gh release create "$TAG" "${flags[@]}" dist/*

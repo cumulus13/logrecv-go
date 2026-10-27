@@ -1,0 +1,28 @@
+logrecv
+logrecv.exe
+bin/
+dist/
+
+# Ignore Sublime Text project files
+*.sublime-project
+*.sublime-workspace
+
+# Added entries (8 items)
+*tmp
+*.tmp
+download/
+downloads/
+gitignore_backup/
+dists/
+*.bak
+*.exe
+
+# Added entries (5 items)
+*sublime*
+*.patch
+ANSWER*.md
+PLAN*.md
+QUESTION*.md
+
+# Added entries (1 items)
+QUEST*.md
