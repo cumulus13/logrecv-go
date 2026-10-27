@@ -23,7 +23,7 @@ jobs:
           go vet ./...
           go test -count=1 ./...
       - name: Build release archives
-        run: .github/scripts/build-release.sh "$GITHUB_REF_NAME" dist
+        run: bash .github/scripts/build-release.sh "$GITHUB_REF_NAME" dist
       - name: Checksums
         working-directory: dist
         run: |

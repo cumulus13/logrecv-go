@@ -1,7 +1,7 @@
 // File: console_windows.go
 // Author: Hadi Cahyadi <cumulus13@gmail.com>
 // Date: 2026-10-28
-// Description: 
+// Description:
 // License: MIT
 
 //go:build windows

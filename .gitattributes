@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.go text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+.github/targets.txt text eol=lf
+*.exe binary

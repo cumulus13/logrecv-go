@@ -54,20 +54,24 @@ jobs:
         run: go test -race -count=1 ./...
       - name: Build
         shell: bash
-        run: go build -trimpath -o ./bin/ .
+        run: |
+          exe=""; [[ "$RUNNER_OS" == "Windows" ]] && exe=".exe"
+          go build -trimpath -o "./bin/logrecv${exe}" .
       - name: Smoke test CLI
         shell: bash
         run: |
+          exe=""; [[ "$RUNNER_OS" == "Windows" ]] && exe=".exe"
+          bin="./bin/logrecv${exe}"
           export LOGRECV_CONFIG="$RUNNER_TEMP/logrecv-ci/config.json"
-          ./bin/logrecv version
-          ./bin/logrecv path
-          ./bin/logrecv init
-          ./bin/logrecv show -json > /dev/null
-          ./bin/logrecv show -color always
-          if ./bin/logrecv init 2>/dev/null; then
+          "$bin" version
+          "$bin" path
+          "$bin" init
+          "$bin" show -json > /dev/null
+          "$bin" show -color always
+          if "$bin" init 2>/dev/null; then
             echo "init must refuse to overwrite without -f"; exit 1
           fi
-          ./bin/logrecv init -f
+          "$bin" init -f
 
   cross-build:
     name: Cross-compile all targets
@@ -79,4 +83,4 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Build every target
-        run: .github/scripts/build-release.sh "ci-${GITHUB_SHA::7}" dist
+        run: bash .github/scripts/build-release.sh "ci-${GITHUB_SHA::7}" dist

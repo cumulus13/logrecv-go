@@ -1,7 +1,7 @@
 // File: main_test.go
 // Author: Hadi Cahyadi <cumulus13@gmail.com>
 // Date: 2026-10-28
-// Description: 
+// Description:
 // License: MIT
 
 package main
