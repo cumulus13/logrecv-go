@@ -111,7 +111,7 @@ func TestConfigLoadMerge(t *testing.T) {
 	if cfg.Datetime != "#111111" || cfg.Levels.Info.Text.FG != "#222222" || cfg.Levels.Info.Text.BG != "" {
 		t.Errorf("override failed: %+v", cfg)
 	}
-	if cfg.Levels.Info.Level.BG != "#00FF00" || cfg.App != "#00AAFF" {
+	if cfg.Levels.Info.Level.BG != "#00FF00" || cfg.App != "#00AA00" {
 		t.Errorf("defaults lost: %+v", cfg)
 	}
 	write(`{"bogus":1}`)

@@ -267,7 +267,7 @@ are caught. Colors are `#RRGGBB` or `#RGB` (`#` optional).
 {
   "datetime": "#00AAFF",
   "host":     "#FFFFFF",
-  "app":      "#00AAFF",
+  "app":      "#00AA00",
   "pid":      "#E8E8E8",
   "channel":  "#FFFFFF",
   "extra":    "#FFFFFF",
@@ -315,7 +315,7 @@ override a `level` or `text` object it replaces the default object entirely, so 
 | INFO | `#000000` on `#00FF00` | `#00FF00` |
 | DEBUG | `#FFFFFF` on `#FF5500` | `#FFFFFF` on `#FF5500` |
 
-Datetime and app are `#00AAFF`, pid is `#E8E8E8`, and JSON/dict payloads, hosts, channels and traces are `#FFFFFF`.
+Datetime is `#00AAFF`, app is `#00AA00`, pid is `#E8E8E8`, and JSON/dict payloads, hosts, channels and traces are `#FFFFFF`.
 
 ### Config commands
 
@@ -469,6 +469,12 @@ everything else `.tar.gz`.
 - **Ports below 1024 (e.g. 514) fail with a permission error**: run with sufficient privileges or use a high port and point your senders at it.
 - **No colors in a pipe or in Git Bash**: this is intentional in `auto` mode; use `-color always`.
 - **Colors look wrong or washed out**: your terminal may not support truecolor. Try `-color 256`.
+- **Some colors look different from the config (for example white text on red or orange turns dark)**: `logrecv` sends the exact
+  24-bit colors you configured; the terminal is changing them. Windows Terminal's "Automatically adjust lightness of
+  indistinguishable text" (`adjustIndistinguishableColors`) and VS Code's `terminal.integrated.minimumContrastRatio` darken or
+  lighten any foreground whose contrast against its background is too low (white on `#FF0000` is about 4:1). Set
+  `"adjustIndistinguishableColors": "never"` in your Windows Terminal profile (or `"terminal.integrated.minimumContrastRatio": 1`
+  in VS Code) to show the colors exactly. To confirm what is being sent, run `logrecv show` in a terminal without such a feature.
 - **Config edits don't seem to apply**: check stderr for `config reload failed`; run `logrecv show` to see the exact error.
 - **Windows console shows escape codes literally**: use Windows Terminal or Windows 10+ console; `logrecv` enables VT processing automatically.
 - **Nothing shows up**: check the sender's target port/protocol, any `-level` / `-grep` filter, and your firewall (UDP is silent when dropped).

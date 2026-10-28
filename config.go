@@ -64,7 +64,7 @@ func defaultConfig() Config {
 	return Config{
 		Datetime: "#00AAFF",
 		Host:     "#FFFFFF",
-		App:      "#00AAFF",
+		App:      "#00AA00",
 		PID:      "#E8E8E8",
 		Channel:  "#FFFFFF",
 		Extra:    "#FFFFFF",
