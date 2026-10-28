@@ -8,6 +8,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,16 +31,19 @@ var version = "dev"
 var (
 	sevName = [8]string{"EMERG", "ALERT", "CRIT", "ERROR", "WARN", "NOTICE", "INFO", "DEBUG"}
 
-	re5424    = regexp.MustCompile(`^<(\d{1,3})>\d+ (\S+) (\S+) (\S+) (\S+) (\S+) (?:-|\[.*?\])\s?(.*)$`)
-	re3164    = regexp.MustCompile(`^<(\d{1,3})>([A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}) (\S+) (?:([^\s:\[]+)(?:\[(\d+)\])?:\s?)?(.*)$`)
-	rePri     = regexp.MustCompile(`^<(\d{1,3})>(.*)$`)
-	reLaravel = regexp.MustCompile(`^(\w+)\.(DEBUG|INFO|NOTICE|WARNING|ERROR|CRITICAL|ALERT|EMERGENCY): ?(.*)$`)
-	reExtra   = regexp.MustCompile(`(?:^|\s)[{\[]["'{\[]`)
+	re5424 = regexp.MustCompile(`^<(\d{1,3})>[ \t]*\d+ (\S+) (\S+) (\S+) (\S+) (\S+) (?:-|\[.*?\])\s?(.*)$`)
+	re3164 = regexp.MustCompile(`^<(\d{1,3})>[ \t]*([A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\S+) (\S+) (?:([^\s:\[]+)(?:\[(\d+)\])?:\s?)?(.*)$`)
+	// RFC 3164 without a hostname: <PRI>Mon dd hh:mm:ss tag[pid]: msg (e.g. Rust's syslog crate)
+	re3164NoHost = regexp.MustCompile(`^<(\d{1,3})>[ \t]*([A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\S+) ([^\s:\[]+)(?:\[(\d+)\])?: ?(.*)$`)
+	rePri        = regexp.MustCompile(`^<(\d{1,3})>[ \t]*(.*)$`)
+	reLaravel    = regexp.MustCompile(`^(\w+)\.(DEBUG|INFO|NOTICE|WARNING|ERROR|CRITICAL|ALERT|EMERGENCY): ?(.*)$`)
+	reExtra      = regexp.MustCompile(`(?:^|\s)[{\[]["'{\[]`)
 )
 
 type entry struct {
 	sev                 int
 	host, app, pid, msg string
+	pri                 bool // line carried a syslog <PRI> header
 }
 
 func clean(s string) string {
@@ -62,6 +66,14 @@ func parse(line string, from net.IP) entry {
 			e.host = h
 		}
 		e.app, e.pid, e.msg = clean(m[4]), clean(m[5]), m[7]
+		e.pri = true
+		return e
+	}
+	if m := re3164NoHost.FindStringSubmatch(line); m != nil {
+		pri, _ := strconv.Atoi(m[1])
+		e.sev = pri & 7
+		e.app, e.pid, e.msg = m[3], m[4], m[5]
+		e.pri = true
 		return e
 	}
 	if m := re3164.FindStringSubmatch(line); m != nil {
@@ -71,14 +83,25 @@ func parse(line string, from net.IP) entry {
 			e.host = h
 		}
 		e.app, e.pid, e.msg = m[4], m[5], m[6]
+		e.pri = true
 		return e
 	}
 	if m := rePri.FindStringSubmatch(line); m != nil {
 		pri, _ := strconv.Atoi(m[1])
 		e.sev = pri & 7
 		e.msg = m[2]
+		e.pri = true
 	}
 	return e
+}
+
+// inherit makes a line without its own <PRI> header (a continuation line such
+// as a traceback) share severity, host, app and pid with the line before it.
+func inherit(e *entry, prev *entry) {
+	if e.pri || prev == nil {
+		return
+	}
+	e.sev, e.host, e.app, e.pid = prev.sev, prev.host, prev.app, prev.pid
 }
 
 func parseLevel(s string) (int, error) {
@@ -153,18 +176,22 @@ type receiver struct {
 
 func logf(format string, a ...any) { fmt.Fprintf(os.Stderr, "logrecv: "+format+"\n", a...) }
 
-func (r *receiver) emit(raw string, from net.IP) {
+// emit parses and prints one line. prev is the previous line of the same
+// datagram or connection (nil for the first). It returns the parsed entry and
+// false when the line was empty.
+func (r *receiver) emit(raw string, from net.IP, prev *entry) (entry, bool) {
 	raw = strings.TrimRight(raw, "\r\n\x00")
 	raw = strings.TrimPrefix(raw, "\ufeff")
 	if raw == "" {
-		return
+		return entry{}, false
 	}
 	e := parse(sanitize(raw), from)
+	inherit(&e, prev)
 	if e.sev > r.minSev {
-		return
+		return e, true
 	}
 	if r.grep != "" && !strings.Contains(strings.ToLower(raw), r.grep) {
-		return
+		return e, true
 	}
 	line := render(r.store.theme(), e, time.Now(), r.timeFmt)
 
@@ -172,18 +199,22 @@ func (r *receiver) emit(raw string, from net.IP) {
 	defer r.mu.Unlock()
 	if _, err := io.WriteString(os.Stdout, line+"\n"); err != nil {
 		r.cancel() // stdout closed (e.g. piped to head)
-		return
+		return e, true
 	}
 	if r.file != nil {
 		if _, err := io.WriteString(r.file, raw+"\n"); err != nil {
 			logf("file write: %v", err)
 		}
 	}
+	return e, true
 }
 
 func (r *receiver) handle(data string, from net.IP) {
+	var prev *entry
 	for _, l := range strings.Split(data, "\n") {
-		r.emit(l, from)
+		if e, ok := r.emit(l, from, prev); ok {
+			prev = &e
+		}
 	}
 }
 
@@ -207,6 +238,21 @@ func (r *receiver) serveUDP(ctx context.Context, pc net.PacketConn) {
 	}
 }
 
+// splitLines is a bufio.SplitFunc that ends a message at '\n' or at a NUL byte,
+// so both newline-framed senders and NUL-framed ones (Python's SysLogHandler) work.
+func splitLines(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexAny(data, "\n\x00"); i >= 0 {
+		return i + 1, data[:i], nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
 func (r *receiver) serveTCP(ctx context.Context, ln net.Listener) {
 	stop := context.AfterFunc(ctx, func() { ln.Close() })
 	defer stop()
@@ -227,8 +273,12 @@ func (r *receiver) serveTCP(ctx context.Context, ln net.Listener) {
 			}
 			sc := bufio.NewScanner(c)
 			sc.Buffer(make([]byte, 64*1024), 1024*1024)
+			sc.Split(splitLines)
+			var prev *entry
 			for sc.Scan() {
-				r.emit(sc.Text(), ip)
+				if e, ok := r.emit(sc.Text(), ip, prev); ok {
+					prev = &e
+				}
 			}
 			if err := sc.Err(); err != nil && ctx.Err() == nil {
 				logf("tcp %v: %v", c.RemoteAddr(), err)

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bufio"
 	"net"
 	"os"
 	"path/filepath"
@@ -162,5 +163,82 @@ func TestParseLevel(t *testing.T) {
 	}
 	if _, err := parseLevel("loud"); err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestParseGoSyslogFormat(t *testing.T) {
+	// log/syslog: <PRI>RFC3339 host tag[pid]: msg
+	e := parse(`<11>2026-10-28T10:00:00+07:00 web01 myapp[77]: boom`, net.ParseIP("10.0.0.1"))
+	if !e.pri || e.sev != 3 || e.host != "web01" || e.app != "myapp" || e.pid != "77" || e.msg != "boom" {
+		t.Errorf("rfc3339 3164: %+v", e)
+	}
+}
+
+func TestInheritContinuation(t *testing.T) {
+	first := parse(`<11>Oct 28 10:00:00 vm myapp[9]: boom`, nil)
+	cont := parse(`Traceback (most recent call last):`, net.ParseIP("1.2.3.4"))
+	inherit(&cont, &first)
+	if cont.sev != 3 || cont.host != "vm" || cont.app != "myapp" || cont.pid != "9" {
+		t.Errorf("continuation did not inherit: %+v", cont)
+	}
+	own := parse(`<14>other line`, nil)
+	inherit(&own, &first)
+	if own.sev != 6 || own.app != "" {
+		t.Errorf("line with own PRI must not inherit: %+v", own)
+	}
+	lone := parse(`plain`, nil)
+	inherit(&lone, nil)
+	if lone.sev != 6 {
+		t.Errorf("no previous line: %+v", lone)
+	}
+}
+
+func TestParseSpaceAfterPRI(t *testing.T) {
+	// some senders put a space between <PRI> and the timestamp
+	e := parse(`<11> Oct 28 11:06:29 LIC-X TESTME: TEST 001`, net.ParseIP("127.0.0.1"))
+	if !e.pri || e.sev != 3 || e.host != "LIC-X" || e.app != "TESTME" || e.msg != "TEST 001" {
+		t.Errorf("space + tag: %+v", e)
+	}
+	e = parse(`<11> Oct 28 11:06:02 LIC-X TEST 001"`, net.ParseIP("127.0.0.1"))
+	if e.sev != 3 || e.host != "LIC-X" || e.app != "" || e.msg != `TEST 001"` {
+		t.Errorf("space, no tag: %+v", e)
+	}
+	e = parse(`<15> 1 2026-10-28T10:00:00Z h a 1 - - hi`, nil)
+	if e.sev != 7 || e.host != "h" || e.app != "a" || e.msg != "hi" {
+		t.Errorf("space + 5424: %+v", e)
+	}
+	e = parse(`<15>   plain`, nil)
+	if e.sev != 7 || e.msg != "plain" {
+		t.Errorf("space + bare PRI: %+v", e)
+	}
+}
+
+func TestParseNoHostname(t *testing.T) {
+	ip := net.ParseIP("10.1.1.1")
+	e := parse(`<14>Oct 28 04:29:59 my-rust-app[741]: user logged in`, ip)
+	if e.sev != 6 || e.host != "10.1.1.1" || e.app != "my-rust-app" || e.pid != "741" || e.msg != "user logged in" {
+		t.Errorf("no hostname: %+v", e)
+	}
+	// the normal "host tag: msg" form must be unaffected
+	e = parse(`<14>Oct 28 04:29:59 vm myapp[9]: hi`, ip)
+	if e.host != "vm" || e.app != "myapp" || e.pid != "9" || e.msg != "hi" {
+		t.Errorf("with hostname: %+v", e)
+	}
+	e = parse(`<11> Oct 28 11:06:29 LIC-X TESTME: TEST 001`, ip)
+	if e.host != "LIC-X" || e.app != "TESTME" {
+		t.Errorf("space + hostname + tag: %+v", e)
+	}
+}
+
+func TestSplitLines(t *testing.T) {
+	sc := bufio.NewScanner(strings.NewReader("one\ntwo\x00three\r\nlast"))
+	sc.Split(splitLines)
+	var got []string
+	for sc.Scan() {
+		got = append(got, strings.TrimRight(sc.Text(), "\r"))
+	}
+	want := []string{"one", "two", "three", "last"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("splitLines = %q, want %q", got, want)
 	}
 }

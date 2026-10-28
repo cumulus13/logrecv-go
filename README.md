@@ -18,6 +18,7 @@ colorful, aligned lines. Every color is a **hex code** you can change in a confi
 - Truecolor with automatic fallback to 256 colors, respects `NO_COLOR` and disables colors when piped
 - Safe output: control characters in incoming logs can't inject terminal escape sequences
 - Level filter, text filter, and raw-line file tee
+- Ready-made logging setups for **Laravel (Monolog), Python, Go and Rust**, see [Integrations](#integrations)
 - Prebuilt binaries for Linux, Windows, macOS, the BSDs, Solaris/illumos, AIX and Plan 9
 
 ## Contents
@@ -27,6 +28,7 @@ colorful, aligned lines. Every color is a **hex code** you can change in a confi
 - [Quick start](#quick-start)
 - [Usage](#usage)
 - [Sending logs to it](#sending-logs-to-it)
+- [Integrations: Laravel, Python, Go, Rust](#integrations)
 - [Supported message formats](#supported-message-formats)
 - [Colors and configuration](#colors-and-configuration)
 - [Hot reload](#hot-reload)
@@ -157,6 +159,8 @@ logrecv -color always | less -R             # keep colors when paging
 
 ## Sending logs to it
 
+Anything that speaks syslog (RFC 5424 or RFC 3164) works. Quick tests from a shell:
+
 ```sh
 # util-linux logger over UDP
 logger -n 127.0.0.1 -P 5514 -d -p user.warning -t myapp "disk almost full"
@@ -164,25 +168,8 @@ logger -n 127.0.0.1 -P 5514 -d -p user.warning -t myapp "disk almost full"
 # raw datagram with netcat (RFC 5424: <PRI>VERSION TIMESTAMP HOST APP PID MSGID SD MSG)
 echo '<11>1 2026-10-28T10:00:00Z web01 nginx 4242 - - upstream failed {"code":502}' | nc -u -w1 127.0.0.1 5514
 
-# TCP, newline-delimited
-printf '<14>Oct 28 10:00:00 db01 postgres[7]: ready\n' | nc -w1 127.0.0.1 5514
-```
-
-```python
-# Python
-import logging, logging.handlers
-h = logging.handlers.SysLogHandler(address=("127.0.0.1", 5514))
-logging.getLogger().addHandler(h)
-logging.getLogger().error("hello from python")
-```
-
-```php
-<?php // Laravel config/logging.php channel
-'syslog_udp' => [
-    'driver'  => 'monolog',
-    'handler' => Monolog\Handler\SyslogUdpHandler::class,
-    'handler_with' => ['host' => '127.0.0.1', 'port' => 5514],
-],
+# TCP: one message per line
+printf '<14>Oct 28 10:00:00 db01 postgres[7]: ready\n' | nc -w1 127.0.0.1 5514   # needs: logrecv -tcp :5514
 ```
 
 ```powershell
@@ -192,6 +179,548 @@ $b = [Text.Encoding]::UTF8.GetBytes('<11>1 2026-10-28T10:00:00Z win01 app 1 - - 
 $u.Send($b, $b.Length, '127.0.0.1', 5514) | Out-Null
 ```
 
+For application code, see [Integrations](#integrations) below. rsyslog can forward everything with
+`*.* @127.0.0.1:5514` (UDP) or `*.* @@127.0.0.1:5514` (TCP).
+
+## Integrations
+
+Every example below sends to `127.0.0.1:5514` over **UDP** (the default). For TCP start the receiver with
+`logrecv -tcp :5514` (UDP and TCP can use the same port number). Runnable copies of all the code live in
+[`examples/`](examples/). Replace `127.0.0.1` with the machine running `logrecv` when your app runs elsewhere.
+
+What you get on screen, whatever the language:
+
+```
+10:15:02.114  DEBUG  web01 my-app[240] cache miss {"key":"user:42"}
+10:15:02.115  INFO   web01 my-app[240] user logged in {"name":"hadi"}
+10:15:02.116  ERROR  web01 my-app[240] payment failed {"order":1234}
+```
+
+The colored parts are the timestamp, the level badge, the host, the app name, the pid and the trailing JSON.
+
+### Laravel
+
+Needs Laravel 10 or newer (Monolog 3). Laravel talks to `logrecv` through Monolog's `SyslogUdpHandler`, no package required.
+
+**1. Add a channel** to `config/logging.php`
+([`examples/laravel/logging-channel.php`](examples/laravel/logging-channel.php)):
+
+```php
+<?php
+// config/logging.php  (Laravel 10+ / Monolog 3)
+
+use Monolog\Formatter\LineFormatter;
+use Monolog\Handler\SyslogUdpHandler;
+use Monolog\Processor\PsrLogMessageProcessor;
+
+return [
+    // ...
+    'channels' => [
+        // ...
+        'logrecv' => [
+            'driver'  => 'monolog',
+            'level'   => env('LOG_LEVEL', 'debug'),
+            'handler' => SyslogUdpHandler::class,
+            'handler_with' => [
+                'host'  => env('LOGRECV_HOST', '127.0.0.1'),
+                'port'  => (int) env('LOGRECV_PORT', 5514),
+                'ident' => env('LOGRECV_IDENT', 'laravel'), // shown as the app name (no spaces)
+            ],
+            // Laravel's default formatter adds a "[date]" prefix; logrecv already shows the time.
+            'formatter' => LineFormatter::class,
+            'formatter_with' => [
+                'format' => '%channel%.%level_name%: %message% %context% %extra%',
+                'allowInlineLineBreaks' => true,
+                'ignoreEmptyContextAndExtra' => true,
+                'includeStacktraces' => true,
+            ],
+            'processors' => [PsrLogMessageProcessor::class],
+        ],
+    ],
+];
+```
+
+**2. Turn it on** in `.env`, either on its own:
+
+```env
+LOG_CHANNEL=logrecv
+```
+
+or next to your normal log file (Laravel 11+; on older versions add `'logrecv'` to the `channels` array of the `stack` channel):
+
+```env
+LOG_CHANNEL=stack
+LOG_STACK=single,logrecv
+```
+
+Optional settings:
+
+```env
+LOGRECV_HOST=127.0.0.1
+LOGRECV_PORT=5514
+LOGRECV_IDENT=my-laravel-app
+```
+
+**3. Log as usual**:
+
+```php
+use Illuminate\Support\Facades\Log;
+
+Log::debug('query', ['sql' => 'select 1', 'ms' => 0.4]);
+Log::info('user {name} logged in', ['name' => 'hadi']);
+Log::warning('disk almost full', ['free_gb' => 1.2]);
+Log::error('payment failed', ['order' => 1234]);
+
+Log::channel('logrecv')->info('only sent to logrecv');   // when you use the stack
+
+try {
+    throw new RuntimeException('boom');
+} catch (Throwable $e) {
+    report($e);                                          // stack trace lines get the error colors
+}
+```
+
+Notes:
+
+- The `%channel%` part is your `APP_ENV` (for example `local`), shown as `[local]` in its own color.
+- `formatter` is set on purpose: Laravel's default formatter prefixes every line with `[2026-10-28 10:15:02]`, which would
+  repeat the time `logrecv` already shows. With the default formatter things still work, just noisier.
+- `ident` becomes the app name column. Keep it free of spaces.
+- Running in Docker or Sail? Point `LOGRECV_HOST` at the host: `host.docker.internal` (on Linux Docker add
+  `--add-host=host.docker.internal:host-gateway` or use the `extra_hosts` entry in Compose).
+- Each log line is its own UDP datagram, so a large stack trace can't blow past the datagram limit.
+
+Without Laravel, the same thing with plain Monolog (`composer require monolog/monolog`):
+
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+
+use Monolog\Formatter\LineFormatter;
+use Monolog\Handler\SyslogUdpHandler;
+use Monolog\Logger;
+
+$handler = new SyslogUdpHandler(host: '127.0.0.1', port: 5514, ident: 'my-php-app');
+$handler->setFormatter(new LineFormatter(
+    format: '%channel%.%level_name%: %message% %context% %extra%',
+    allowInlineLineBreaks: true,
+    ignoreEmptyContextAndExtra: true,
+    includeStacktraces: true,
+));
+
+$log = new Logger('app', [$handler]);
+$log->error('payment failed', ['order' => 1234]);
+```
+
+### Python
+
+Standard library only. The three-line version
+([`examples/python/simple.py`](examples/python/simple.py)):
+
+```python
+import logging
+from logging.handlers import SysLogHandler
+
+log = logging.getLogger("myapp")
+log.setLevel(logging.DEBUG)
+log.addHandler(SysLogHandler(address=("127.0.0.1", 5514)))
+
+log.debug("cache miss")
+log.info("user logged in")
+log.warning("disk almost full")
+log.error("payment failed")
+log.critical("queue stalled")
+```
+
+That shows the level and message, with the sender's IP as the host. To also get **host, app name and pid** in their own
+colors, give the handler a syslog-style format
+([`examples/python/formatted.py`](examples/python/formatted.py)):
+
+```python
+import logging
+import socket
+from logging.handlers import SysLogHandler
+
+HOST = socket.gethostname()
+
+handler = SysLogHandler(address=("127.0.0.1", 5514), facility=SysLogHandler.LOG_USER)
+# RFC 3164 style header so logrecv can show host, app name and pid in their own colors
+handler.setFormatter(logging.Formatter(
+    f"%(asctime)s {HOST} %(name)s[%(process)d]: %(message)s",
+    datefmt="%b %d %H:%M:%S",
+))
+
+log = logging.getLogger("myapp")
+log.setLevel(logging.DEBUG)
+log.addHandler(handler)
+
+log.info("user logged in")
+log.error("payment failed")
+try:
+    1 / 0
+except ZeroDivisionError:
+    log.exception("boom")  # the traceback is shown with the same level/host/app
+```
+
+Multi-line messages such as tracebacks arrive as one datagram; every continuation line is shown with the same level, host,
+app and pid as the first line, so a `log.exception(...)` stays red from top to bottom.
+
+**`logging.config.dictConfig` and Django.** Use the same handler and formatter in your config
+([`examples/python/dictconfig.py`](examples/python/dictconfig.py)). In Django, put the dict in `settings.py` as `LOGGING`:
+
+```python
+# Works the same in Django: put this dict in settings.py as LOGGING
+# (and add "disable_existing_loggers": False).
+import logging
+import logging.config
+import socket
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "syslog": {
+            "format": "%(asctime)s " + socket.gethostname() + " %(name)s[%(process)d]: %(message)s",
+            "datefmt": "%b %d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "logrecv": {
+            "class": "logging.handlers.SysLogHandler",
+            "address": ("127.0.0.1", 5514),  # UDP
+            "formatter": "syslog",
+        },
+    },
+    "loggers": {
+        "myapp": {"handlers": ["logrecv"], "level": "DEBUG"},
+    },
+}
+
+logging.config.dictConfig(LOGGING)
+logging.getLogger("myapp").warning("configured with dictConfig")
+```
+
+**TCP** instead of UDP, if you want delivery guarantees
+([`examples/python/tcp.py`](examples/python/tcp.py), start `logrecv -tcp :5514`):
+
+```python
+import logging
+import socket
+from logging.handlers import SysLogHandler
+
+# TCP instead of UDP: reliable delivery, same message format
+handler = SysLogHandler(address=("127.0.0.1", 5514), socktype=socket.SOCK_STREAM)
+
+log = logging.getLogger("myapp")
+log.setLevel(logging.DEBUG)
+log.addHandler(handler)
+
+log.info("one")
+log.error("two")
+```
+
+### Go
+
+Two options.
+
+**A) A `log/slog` handler (recommended).** Portable (it also works on Windows), standard library only, and structured
+attributes are sent as the trailing JSON that `logrecv` highlights. Copy the handler from
+[`examples/go/slog/main.go`](examples/go/slog/main.go) (it is below) and use it like this:
+
+```go
+h, err := NewSyslogHandler("udp", "127.0.0.1:5514", "my-go-app", slog.LevelDebug)
+if err != nil {
+	panic(err)
+}
+defer h.Close()
+log := slog.New(h)
+
+log.Debug("cache miss", "key", "user:42")
+log.Info("user logged in", "name", "hadi", slog.Group("req", "ip", "10.0.0.5", "ms", 12))
+log.Warn("disk almost full", "free_gb", 1.2)
+log.With("order", 1234).Error("payment failed", "err", errors.New("card declined"))
+```
+
+Use `"tcp"` as the first argument to send over TCP. slog levels map to syslog severities: Error is `ERROR`, Warn is
+`WARN`, Info is `INFO`, Debug is `DEBUG`.
+
+<details>
+<summary>Full handler code (<code>examples/go/slog/main.go</code>)</summary>
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"sync"
+	"time"
+)
+
+// SyslogHandler is a slog.Handler that ships RFC 5424 messages to logrecv.
+// Standard library only, works on every OS (including Windows).
+type SyslogHandler struct {
+	mu     *sync.Mutex
+	conn   net.Conn
+	nl     string // "\n" for TCP framing, "" for UDP
+	host   string
+	app    string
+	level  slog.Leveler
+	attrs  []slog.Attr
+	prefix string // dotted group path
+}
+
+// NewSyslogHandler dials network ("udp" or "tcp") and address, e.g. "127.0.0.1:5514".
+func NewSyslogHandler(network, addr, app string, level slog.Leveler) (*SyslogHandler, error) {
+	conn, err := net.Dial(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "-"
+	}
+	nl := ""
+	if network == "tcp" {
+		nl = "\n"
+	}
+	return &SyslogHandler{mu: &sync.Mutex{}, conn: conn, nl: nl, host: host, app: app, level: level}, nil
+}
+
+func (h *SyslogHandler) Close() error { return h.conn.Close() }
+
+func (h *SyslogHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return l >= h.level.Level()
+}
+
+func severity(l slog.Level) int {
+	switch {
+	case l >= slog.LevelError:
+		return 3 // error
+	case l >= slog.LevelWarn:
+		return 4 // warning
+	case l >= slog.LevelInfo:
+		return 6 // info
+	default:
+		return 7 // debug
+	}
+}
+
+func flatten(dst map[string]any, prefix string, a slog.Attr) {
+	v := a.Value.Resolve()
+	if v.Kind() == slog.KindGroup {
+		p := prefix
+		if a.Key != "" {
+			p += a.Key + "."
+		}
+		for _, ga := range v.Group() {
+			flatten(dst, p, ga)
+		}
+		return
+	}
+	if a.Key == "" {
+		return
+	}
+	switch x := v.Any().(type) {
+	case error:
+		dst[prefix+a.Key] = x.Error()
+	default:
+		dst[prefix+a.Key] = x
+	}
+}
+
+func (h *SyslogHandler) Handle(_ context.Context, r slog.Record) error {
+	fields := map[string]any{}
+	for _, a := range h.attrs {
+		flatten(fields, "", a)
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		flatten(fields, h.prefix, a)
+		return true
+	})
+	msg := r.Message
+	if len(fields) > 0 {
+		if b, err := json.Marshal(fields); err == nil {
+			msg += " " + string(b)
+		}
+	}
+	const facilityUser = 1
+	line := fmt.Sprintf("<%d>1 %s %s %s %d - - %s%s",
+		facilityUser*8+severity(r.Level), r.Time.Format(time.RFC3339Nano), h.host, h.app, os.Getpid(), msg, h.nl)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, err := h.conn.Write([]byte(line))
+	return err
+}
+
+func (h *SyslogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	c := *h
+	for _, a := range attrs {
+		if h.prefix != "" {
+			a = slog.Group(h.prefix[:len(h.prefix)-1], a)
+		}
+		c.attrs = append(append([]slog.Attr(nil), c.attrs...), a)
+	}
+	return &c
+}
+
+func (h *SyslogHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	c := *h
+	c.prefix += name + "."
+	return &c
+}
+
+func main() {
+	h, err := NewSyslogHandler("udp", "127.0.0.1:5514", "my-go-app", slog.LevelDebug)
+	if err != nil {
+		panic(err)
+	}
+	defer h.Close()
+	log := slog.New(h)
+
+	log.Debug("cache miss", "key", "user:42")
+	log.Info("user logged in", "name", "hadi", slog.Group("req", "ip", "10.0.0.5", "ms", 12))
+	log.Warn("disk almost full", "free_gb", 1.2)
+	log.With("order", 1234).Error("payment failed", "err", errors.New("card declined"))
+}
+```
+
+</details>
+
+**B) The standard library `log/syslog`.** Unix only (it does not exist on Windows or Plan 9). Short and needs no extra code
+([`examples/go/stdsyslog/main.go`](examples/go/stdsyslog/main.go)):
+
+```go
+//go:build !windows && !plan9
+
+package main
+
+import (
+	"log"
+	"log/syslog"
+)
+
+func main() {
+	w, err := syslog.Dial("udp", "127.0.0.1:5514", syslog.LOG_USER|syslog.LOG_DEBUG, "my-go-app")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer w.Close()
+
+	w.Debug("cache miss")
+	w.Info("user logged in")
+	w.Warning("disk almost full")
+	w.Err("payment failed")
+	w.Crit("queue stalled")
+}
+```
+
+### Rust
+
+Tested with Rust 1.91.
+
+**A) The `syslog` crate with the `log` facade.** Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+syslog = "7"
+log = "0.4"
+```
+
+([`examples/rust/src/bin/syslog_crate.rs`](examples/rust/src/bin/syslog_crate.rs)):
+
+```rust
+use log::{debug, error, info, warn, LevelFilter};
+use syslog::{BasicLogger, Facility, Formatter3164};
+
+fn main() {
+    let formatter = Formatter3164 {
+        facility: Facility::LOG_USER,
+        hostname: None, // detected automatically
+        process: "my-rust-app".into(),
+        pid: std::process::id(),
+    };
+
+    // local socket on any port, logrecv on 127.0.0.1:5514
+    let logger = syslog::udp(formatter, "0.0.0.0:0", "127.0.0.1:5514").expect("cannot connect to logrecv");
+
+    log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
+        .map(|()| log::set_max_level(LevelFilter::Debug))
+        .expect("logger already set");
+
+    debug!("cache miss key={}", "user:42");
+    info!("user logged in name={}", "hadi");
+    warn!("disk almost full free_gb={}", 1.2);
+    error!("payment failed order={}", 1234);
+}
+```
+
+**B) Standard library only**: a tiny RFC 5424 sender over UDP
+([`examples/rust/src/bin/std_udp.rs`](examples/rust/src/bin/std_udp.rs)). Append structured data as JSON at the end of the
+message and `logrecv` will highlight it:
+
+```rust
+use std::net::UdpSocket;
+use std::process;
+
+// Minimal RFC 5424 sender: standard library only.
+struct LogRecv {
+    sock: UdpSocket,
+    host: String,
+    app: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum Level {
+    Error = 3,
+    Warning = 4,
+    Info = 6,
+    Debug = 7,
+}
+
+impl LogRecv {
+    fn new(addr: &str, app: &'static str) -> std::io::Result<Self> {
+        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        sock.connect(addr)?;
+        let host = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "-".into());
+        Ok(Self { sock, host, app })
+    }
+
+    fn log(&self, level: Level, msg: &str) {
+        // <PRI>1 TIMESTAMP HOST APP PID MSGID SD MSG  (timestamp "-" = unknown; logrecv shows its own clock)
+        let line = format!("<{}>1 - {} {} {} - - {}", 8 + level as u8, self.host, self.app, process::id(), msg);
+        let _ = self.sock.send(line.as_bytes()); // UDP: fire and forget
+    }
+}
+
+fn main() -> std::io::Result<()> {
+    let log = LogRecv::new("127.0.0.1:5514", "my-rust-app")?;
+    log.log(Level::Debug, "cache miss {\"key\":\"user:42\"}");
+    log.log(Level::Info, "user logged in {\"name\":\"hadi\"}");
+    log.log(Level::Warning, "disk almost full {\"free_gb\":1.2}");
+    log.log(Level::Error, "payment failed {\"order\":1234}");
+    Ok(())
+}
+```
+
+Run the examples with `cargo run --bin syslog_crate` or `cargo run --bin std_udp` from `examples/rust/`.
+
+### Anything else
+
+If your language or tool can write a UDP datagram, it can log here. The smallest useful message is
+`<PRI>text`, where `PRI` is `facility * 8 + severity` (for example `<11>` is user facility, severity 3 = error). The
+[supported formats](#supported-message-formats) section lists everything that is understood.
+
 ## Supported message formats
 
 Each incoming line is matched in this order; the first match wins.
@@ -200,8 +729,8 @@ Each incoming line is matched in this order; the first match wins.
 flowchart TD
     L["incoming line"] --> Q1{"RFC 5424?  starts with PRI and version"}
     Q1 -->|yes| P1["severity = PRI mod 8, host, app, pid, message"]
-    Q1 -->|no| Q2{"RFC 3164?  PRI, 'Mon dd hh:mm:ss' and host"}
-    Q2 -->|yes| P2["severity, host, app and pid from the tag, message"]
+    Q1 -->|no| Q2{"RFC 3164?  PRI, timestamp, optional host and tag"}
+    Q2 -->|yes| P2["severity, host (or sender IP), app and pid from the tag, message"]
     Q2 -->|no| Q3{"bare PRI?  starts with angle-bracket number"}
     Q3 -->|yes| P3["severity = PRI mod 8, message"]
     Q3 -->|no| P4["severity = INFO, host = sender IP, message = line"]
@@ -219,12 +748,16 @@ flowchart TD
     Q6 -->|no| N["whole message painted with level text color"]
 ```
 
-[![Supported message formats](https://files.catbox.moe/c47fjw.jpg)](https://files.catbox.moe/c47fjw.jpg)
+[![Supported message formats](https://files.catbox.moe/cb68vc.jpg)](https://files.catbox.moe/cb68vc.jpg)
 
 Notes:
 
 - Severity is taken from the low 3 bits of the syslog `<PRI>` value (the facility is ignored).
-- Multi-line UDP datagrams are split on `\n` and each line is handled separately.
+- RFC 3164 is accepted with the classic `Oct 28 10:00:00` timestamp or an RFC 3339 one (Go's `log/syslog`), with or
+  without a hostname (Rust's `syslog` crate omits it; the sender's IP is shown instead), and with an optional space after `<PRI>`.
+- Multi-line UDP datagrams are split on `\n`. A line that has no `<PRI>` of its own (a traceback, for instance) inherits the
+  level, host, app and pid of the line before it, in the same datagram or TCP connection.
+- TCP messages end at a newline or at a NUL byte, so Python's `SysLogHandler` works as it is.
 - Trailing `\r`, `\n`, NUL bytes and a leading BOM are stripped.
 
 | Severity | Label shown | Config key |
@@ -410,6 +943,7 @@ color.go               hex parsing, truecolor/256 ANSI, color mode detection
 console_windows.go     enables ANSI/VT processing on the Windows console
 console_other.go       no-op for other platforms
 main_test.go           unit tests
+examples/              tested logging examples: laravel/, python/, go/, rust/
 .github/targets.txt    release platform list
 .github/scripts/       release build script
 .github/workflows/     CI and release pipelines
